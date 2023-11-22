@@ -1,1 +1,155 @@
+import matplotlib.pyplot as plt
+import pandas as pd
+from sklearn.model_selection import train_test_split
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from torch.utils.data import TensorDataset, DataLoader
+import torch.optim as optim
 
+# Set CUDA to 'False' to use CPU
+CUDA = True
+device = CUDA and torch.cuda.is_available()
+
+### Hyperparamerters ###
+EPOCH_NUM = 100
+BATCH_SIZE = 64   # 0
+lr = 1.5e-4
+Z_DIM = 1
+### Hyperparamerters ###
+
+### Data ###
+old_name = 'full_solutions.csv'
+primes = pd.read_csv(old_name, sep='\t')
+primes = primes.drop(columns='Unnamed: 0')
+x = primes.iloc[:, 0].values
+y = primes.iloc[:, 1].values
+
+x_real, x_val, y_real, y_val = map(torch.tensor, train_test_split(x, y, test_size=0.2))
+train_dataloader = DataLoader(TensorDataset(x_real.unsqueeze(1), y_real.unsqueeze(1)), batch_size=BATCH_SIZE,
+                              pin_memory=True, shuffle=True)
+val_dataloader = DataLoader(TensorDataset(x_val.unsqueeze(1), y_val.unsqueeze(1)), batch_size=BATCH_SIZE,
+                            pin_memory=True, shuffle=True)
+### Data ###
+
+class Discriminator(nn.Module):
+    def __init__(self):
+        super(Discriminator, self).__init__()
+        self.fc1 = nn.Linear(1, 256)
+        self.fc2 = nn.Linear(256, 256)
+        self.fc3 = nn.Linear(256, 1)
+
+    def forward(self, x):
+        x = self.fc1(x)
+        x = F.relu(x)
+        x = self.fc2(x)
+        x = F.relu(x)
+        x = self.fc3(x)
+        x = torch.sigmoid(x)
+        return x
+
+class Generator(nn.Module):
+    def __init__(self):
+        super(Generator, self).__init__()
+
+        self.fc1 = nn.Linear(1, 32)
+        self.fc2 = nn.Linear(32, 256)
+        self.fc3 = nn.Linear(256, 256)
+        self.fc4 = nn.Linear(256, 32)
+        self.fc5 = nn.Linear(32, 1)
+
+    def forward(self, x):
+        x = self.fc1(x)
+        x = F.relu(x)
+        x = self.fc2(x)
+        x = F.relu(x)
+        # x = self.fc3(x)
+        # x = F.relu(x)
+        x = self.fc4(x)
+        x = F.relu(x)
+        x = self.fc5(x)
+        return x
+
+# Models
+netD = Discriminator()
+netG = Generator()
+
+# Optimizers
+optimizerD = optim.Adam(netD.parameters(), lr=lr, betas=(0.5, 0.999))
+optimizerG = optim.Adam(netG.parameters(), lr=lr, betas=(0.5, 0.999))
+
+# loss functions
+criterion_score = nn.BCELoss()
+criterion_dist = nn.L1Loss()
+
+# track losses
+g_dist_losses = []
+
+for epoch in range(EPOCH_NUM):
+    print("Epoch %d / %d" % (epoch + 1, EPOCH_NUM))
+    # training loop
+    temp_loss_list = list()
+    for x_real, y_real in train_dataloader:
+        x_real = x_real.type(torch.float32)
+        y_real = y_real.type(torch.float32)
+        #print('x_real.size(0): ' + str((x_real.size(0),)))
+        #print('netD: ' + str(netD.fc1.weight.dtype))
+        #print('x_real: ' + str(x_real.dtype))
+        #print('netG: ' + str(netG.fc1.weight.dtype))
+        
+        # real_label = torch.full((x_real.size(0),), REAL_LABEL, device=device)
+        # fake_label = torch.full((y_real.size(0),), FAKE_LABEL, device=device)
+        
+        REAL_LABEL = torch.ones(x_real.size(0), 1, dtype=torch.float32)
+        FAKE_LABEL = torch.zeros(x_real.size(0), 1, dtype=torch.float32) 
+        real_label = REAL_LABEL.type(torch.float32)
+        fake_label = FAKE_LABEL.type(torch.float32)
+
+        # Get loss_D_real
+        netD.zero_grad()
+        score_real = netD(x_real)
+        # real_label = real_label.float()
+        loss_D_real = criterion_score(score_real, real_label)
+
+        # Get loss_D_fake
+        z_noise = torch.randn(x_real.size(0), Z_DIM)
+        y_fake = netG(z_noise)
+        score_fake = netD(y_fake.detach())
+        # fake_label = fake_label.float()
+        loss_D_fake = criterion_score(score_fake, fake_label)
+
+        # Calculate average loss and update discriminator
+        loss_D_ave = (loss_D_real + loss_D_fake)/2
+        loss_D_ave.backward()
+        optimizerD.step()
+
+        # Get loss_G_score
+        netG.zero_grad()
+        score_fake_r = netD(y_fake)
+        # real_label = real_label.float()
+        loss_G_score = criterion_score(score_fake_r, real_label)
+
+        # Update generator
+        loss_G_score.backward()
+        optimizerG.step()
+
+        # Get loss_G_dist
+        netG.zero_grad()
+        y_gen = netG(x_real)
+        loss_G_dist = criterion_dist(y_gen, y_real)
+
+        # Update generator
+        loss_G_dist.backward()
+        optimizerG.step()
+
+    print('Epoch {} loss_D_real: {:.4f} loss_G_score: {:.4f} loss_G_dist: {:.4f}'.format(
+        epoch,
+        loss_D_ave.mean().item(),
+        loss_G_score.mean().item(),
+        loss_G_dist.mean().item()
+    ))
+    g_dist_losses.append(loss_G_dist.mean().item())
+    
+g_dist_losses.plot(x = 'x', y = 'y', legend=None)
+plt.show()
+plt.savefig('g_dist_losses.png')
